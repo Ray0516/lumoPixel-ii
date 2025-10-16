@@ -1,0 +1,340 @@
+
+#include "esp_camera.h"
+#include "FS.h"
+#include "SD_MMC.h"
+#include "time.h"
+
+
+// ===== 硬體腳位 =====
+#define BUTTON 12
+#define FLASH_GPIO 4
+#define RED_LED_GPIO 33
+
+
+#define PWDN_GPIO_NUM 32
+#define RESET_GPIO_NUM -1
+#define XCLK_GPIO_NUM 0
+#define SIOD_GPIO_NUM 26
+#define SIOC_GPIO_NUM 27
+#define Y9_GPIO_NUM 35
+#define Y8_GPIO_NUM 34
+#define Y7_GPIO_NUM 39
+#define Y6_GPIO_NUM 36
+#define Y5_GPIO_NUM 21
+#define Y4_GPIO_NUM 19
+#define Y3_GPIO_NUM 18
+#define Y2_GPIO_NUM 5
+#define VSYNC_GPIO_NUM 25
+#define HREF_GPIO_NUM 23
+#define PCLK_GPIO_NUM 22
+
+
+// ===== 全域變數 =====
+bool cameraReady = false;
+bool sdReady = false;
+sensor_t * sensor = NULL;
+
+
+const unsigned long DEBOUNCE_TIME = 50;
+const unsigned long LONG_PRESS_TIME = 2000; // 長按2秒切換模式
+
+
+bool firstPhotoTaken = false;
+bool lastButtonState = HIGH;
+unsigned long buttonPressStart = 0;
+
+
+// ===== 模式 =====
+enum CameraMode { DEFAULT_MODE, PORTRAIT_MODE };
+CameraMode currentMode = DEFAULT_MODE;
+
+
+// ===== 禁止 log =====
+void disableLogs() { esp_log_level_set("*", ESP_LOG_NONE); }
+
+
+// ===== 狀態列印 =====
+void printStatus() {
+  Serial.println("-------------------------");
+  Serial.print("Camera: "); Serial.println(cameraReady ? "OK" : "FAIL");
+  Serial.print("SD Card: "); Serial.println(sdReady ? "OK" : "FAIL");
+  Serial.print("Mode: "); Serial.println(currentMode == DEFAULT_MODE ? "預設" : "人像");
+  Serial.println("-------------------------");
+}
+
+
+// ===== 錯誤提示 =====
+void flashError() {
+  for (int i = 0; i < 3; i++) {
+    digitalWrite(FLASH_GPIO, HIGH);
+    delay(150);
+    digitalWrite(FLASH_GPIO, LOW);
+    delay(150);
+  }
+}
+
+
+// ===== 相機初始化 =====
+bool initCamera() {
+  camera_config_t config;
+  config.ledc_channel = LEDC_CHANNEL_0;
+  config.ledc_timer = LEDC_TIMER_0;
+  config.pin_d0 = Y2_GPIO_NUM;
+  config.pin_d1 = Y3_GPIO_NUM;
+  config.pin_d2 = Y4_GPIO_NUM;
+  config.pin_d3 = Y5_GPIO_NUM;
+  config.pin_d4 = Y6_GPIO_NUM;
+  config.pin_d5 = Y7_GPIO_NUM;
+  config.pin_d6 = Y8_GPIO_NUM;
+  config.pin_d7 = Y9_GPIO_NUM;
+  config.pin_xclk = XCLK_GPIO_NUM;
+  config.pin_pclk = PCLK_GPIO_NUM;
+  config.pin_vsync = VSYNC_GPIO_NUM;
+  config.pin_href = HREF_GPIO_NUM;
+  config.pin_sscb_sda = SIOD_GPIO_NUM;
+  config.pin_sscb_scl = SIOC_GPIO_NUM;
+  config.pin_pwdn = PWDN_GPIO_NUM;
+  config.pin_reset = RESET_GPIO_NUM;
+  config.xclk_freq_hz = 20000000;
+  config.pixel_format = PIXFORMAT_JPEG;
+  config.fb_count = 1;
+
+
+  if(psramFound()){
+    config.frame_size = FRAMESIZE_UXGA;
+    config.jpeg_quality = 28;
+  } else {
+    config.frame_size = FRAMESIZE_SVGA;
+    config.jpeg_quality = 28;
+  }
+
+
+  if(esp_camera_init(&config) != ESP_OK){
+    cameraReady = false;
+    return false;
+  }
+  cameraReady = true;
+
+
+  sensor = esp_camera_sensor_get();
+  if(sensor){
+    // ===== 預設模式校正 =====
+    sensor->set_brightness(sensor, 1);
+    sensor->set_contrast(sensor, 1);
+    sensor->set_saturation(sensor, 2);
+    sensor->set_sharpness(sensor, 1);
+
+
+    // ===== 自動白平衡 =====
+    sensor->set_whitebal(sensor, 1);
+    sensor->set_awb_gain(sensor, 1);
+    sensor->set_wb_mode(sensor, 1); // 0:自動, 1:晴天, 2:陰天, 3:室內光源
+
+
+    // ===== 自動曝光/增益 =====
+    sensor->set_gain_ctrl(sensor, 1); // AGC
+    sensor->set_exposure_ctrl(sensor, 1); // AEC
+    sensor->set_aec2(sensor, 1);       // 提升曝光精準度
+
+
+    // ===== 畫質校正 =====
+    sensor->set_bpc(sensor, 1);    // 黑點校正
+    sensor->set_wpc(sensor, 1);    // 白點校正
+    sensor->set_raw_gma(sensor, 1); // Gamma 校正
+    sensor->set_lenc(sensor, 1);   // 邊緣亮度補償
+  }
+
+
+  return true;
+}
+
+
+// ===== SD 初始化 =====
+bool initSD() {
+  sdReady = SD_MMC.begin("/sdcard", true);
+  if(sdReady){
+    if(!SD_MMC.exists("/Lumopixel")) SD_MMC.mkdir("/Lumopixel");
+  }
+  return sdReady;
+}
+
+
+// ===== 切換模式 =====
+void toggleMode() {
+  if(currentMode == DEFAULT_MODE){
+    currentMode = PORTRAIT_MODE;
+    Serial.println("[Mode] 切換到人像模式");
+    if(sensor){
+      sensor->set_brightness(sensor, 3);  // 更亮
+      sensor->set_contrast(sensor, 2);
+      sensor->set_saturation(sensor, 3);
+      sensor->set_sharpness(sensor, 2);
+      sensor->set_whitebal(sensor, 1);
+      sensor->set_awb_gain(sensor, 1);
+      sensor->set_gain_ctrl(sensor, 1);
+      sensor->set_exposure_ctrl(sensor, 1);
+      sensor->set_aec2(sensor, 2);
+    }
+  } else {
+    currentMode = DEFAULT_MODE;
+    Serial.println("[Mode] 回到預設模式");
+    if(sensor){
+      sensor->set_brightness(sensor, 1);
+      sensor->set_contrast(sensor, 1);
+      sensor->set_saturation(sensor, 2);
+      sensor->set_sharpness(sensor, 1);
+      sensor->set_whitebal(sensor, 1);
+      sensor->set_awb_gain(sensor, 1);
+      sensor->set_gain_ctrl(sensor, 1);
+      sensor->set_exposure_ctrl(sensor, 1);
+      sensor->set_aec2(sensor, 1);
+    }
+  }
+
+
+  // 紅燈閃爍三次提示
+  for(int i=0;i<3;i++){
+    digitalWrite(RED_LED_GPIO,HIGH);
+    delay(150);
+    digitalWrite(RED_LED_GPIO,LOW);
+    delay(150);
+  }
+
+
+  printStatus();
+}
+
+
+// ===== 拍照 =====
+void takePhoto() {
+  if(!cameraReady || !sdReady){
+    flashError();
+    return;
+  }
+  if(!SD_MMC.cardType()){
+    Serial.println("[Error] SD card removed or error");
+    sdReady = false;
+    flashError();
+    return;
+  }
+
+
+  // 紅燈補光永遠開
+  digitalWrite(RED_LED_GPIO,HIGH);
+
+
+  // 人像模式閃光同步拍照
+  if(currentMode == PORTRAIT_MODE){
+    digitalWrite(FLASH_GPIO,HIGH);  // 打開閃光燈
+    delay(50);                      // LED 穩定
+  }
+
+
+  // 拍照
+  camera_fb_t * fb = esp_camera_fb_get();
+  if(!fb){
+    Serial.println("[Error] Capture failed!");
+    flashError();
+    digitalWrite(FLASH_GPIO,LOW);
+    digitalWrite(RED_LED_GPIO,LOW);
+    return;
+  }
+
+
+  if(!firstPhotoTaken){
+    firstPhotoTaken = true;
+    esp_camera_fb_return(fb);
+    digitalWrite(FLASH_GPIO,LOW);
+    digitalWrite(RED_LED_GPIO,LOW);
+    Serial.println("[Info] 開機首張測試照片已忽略");
+    return;
+  }
+
+
+  // 產生檔名
+  time_t now;
+  struct tm timeinfo;
+  time(&now);
+  localtime_r(&now,&timeinfo);
+  char timeStr[32];
+  strftime(timeStr,sizeof(timeStr),"%Y%m%d_%H%M%S",&timeinfo);
+  char path[64];
+  sprintf(path,"/Lumopixel/%s_%lu.jpg",timeStr,millis()%1000);
+
+
+  File file = SD_MMC.open(path, FILE_WRITE);
+  if(file){
+    file.write(fb->buf, fb->len);
+    file.close();
+    Serial.println("[Photo Saved] "+String(path));
+  } else {
+    Serial.println("[Error] SD write failed");
+    flashError();
+  }
+
+
+  esp_camera_fb_return(fb);
+
+
+  // 拍照完成關閃光燈
+  digitalWrite(FLASH_GPIO,LOW);
+  digitalWrite(RED_LED_GPIO,LOW);
+  printStatus();
+}
+
+
+// ===== 按鈕處理 =====
+void handleButton(){
+  bool state = digitalRead(BUTTON);
+  unsigned long now = millis();
+
+
+  // 按下時記錄時間
+  if(state == LOW && lastButtonState == HIGH){
+    buttonPressStart = now;
+  }
+
+
+  // 長按偵測
+  if(state == LOW && (now - buttonPressStart >= LONG_PRESS_TIME)){
+    toggleMode();       // 切換模式
+    buttonPressStart = now + 1000; // 避免重複觸發
+  }
+
+
+  // 單擊（短按）偵測
+  if(state == HIGH && lastButtonState == LOW){
+    if(now - buttonPressStart < LONG_PRESS_TIME){
+      takePhoto(); // 單擊拍照
+    }
+  }
+
+
+  lastButtonState = state;
+}
+
+
+// ===== Setup =====
+void setup(){
+  disableLogs();
+  Serial.begin(115200);
+  pinMode(BUTTON,INPUT_PULLUP);
+  pinMode(FLASH_GPIO,OUTPUT);
+  pinMode(RED_LED_GPIO,OUTPUT);
+  digitalWrite(FLASH_GPIO,LOW);
+  digitalWrite(RED_LED_GPIO,LOW);
+
+
+  cameraReady = initCamera();
+  sdReady = initSD();
+  printStatus();
+}
+
+
+// ===== Loop =====
+void loop(){
+  handleButton();
+}
+
+
+
