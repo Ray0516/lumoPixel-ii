@@ -1,0 +1,18 @@
+{
+  "name": "LumoPixel GO",
+  "short_name": "LumoPixel GO",
+  "start_url": ".",
+  "display": "standalone",
+  "background_color": "#F5F6F2",
+  "theme_color": "#F5F6F2",
+  "description": "Lumo Pixel camera photo browser",
+  "orientation": "portrait-primary",
+  "prefer_related_applications": false,
+  "icons": [
+    {
+      "sizes": "1024x1024",
+      "src": "icons/icon.png",
+      "type": "image/png"
+    }
+  ]
+}
